@@ -22,6 +22,11 @@ pool = ConnectionPool(
 print("ConnectionPool created: min=2, max=8")
 
 
+@app.route("/")
+def index():
+    return app.send_static_file("index.html")
+
+
 @app.errorhandler(psycopg.OperationalError)
 @app.errorhandler(PoolTimeout)
 def db_unavailable(e):
@@ -37,18 +42,15 @@ def parse_amount(value):
 
 @app.route("/customers", methods=["GET"])
 def list_customers():
-    city = request.args.get("city")
-    if city:
-        sql = ("SELECT customer_id, full_name, city, email FROM customers "
-               "WHERE city = %s ORDER BY customer_id")
-        args = (city,)
-    else:
-        sql = ("SELECT customer_id, full_name, city, email FROM customers "
-               "ORDER BY customer_id")
-        args = ()
+    city = request.args.get("city", default=None)
 
     with pool.connection() as conn:
-        rows = conn.execute(sql, args).fetchall()
+        rows = conn.execute(
+            "SELECT customer_id, full_name, city, email FROM customers "
+            "WHERE (%s::text IS NULL OR city = %s) "
+            "ORDER BY customer_id",
+            (city, city),
+        ).fetchall()
 
     return jsonify([
         {"id": r[0], "name": r[1], "city": r[2], "email": r[3]} for r in rows
@@ -125,6 +127,28 @@ def list_accounts():
     ]), 200
 
 
+@app.route("/accounts/lookup", methods=["GET"])
+def lookup_account():
+    number = request.args.get("number", default=None)
+    if not number:
+        return jsonify({"error": "number is required"}), 400
+
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT a.account_id, a.account_number, c.full_name "
+            "FROM accounts a JOIN customers c ON c.customer_id = a.customer_id "
+            "WHERE a.account_number = %s",
+            (number.strip().upper(),),
+        ).fetchone()
+
+    if row is None:
+        return jsonify({"error": "account not found"}), 404
+
+    parts = row[2].split()
+    owner = parts[0] + (" " + parts[1][0] + "." if len(parts) > 1 else "")
+    return jsonify({"account_id": row[0], "account_number": row[1], "owner": owner}), 200
+
+
 @app.route("/transactions", methods=["GET"])
 def list_transactions():
     account_id = request.args.get("account_id", type=int)
@@ -144,6 +168,7 @@ def list_transactions():
         for r in rows
     ]), 200
 
+
 @app.route("/transactions", methods=["POST"])
 def create_transaction():
     data = request.get_json(force=True)
@@ -157,19 +182,17 @@ def create_transaction():
         return jsonify({"error": "amount must be a number > 0"}), 400
 
     with pool.connection() as conn:
-        try:
+        with conn.transaction():
             row = conn.execute(
                 "SELECT balance FROM accounts WHERE account_id = %s FOR UPDATE",
                 (account_id,),
             ).fetchone()
             if row is None:
-                conn.rollback()
                 return jsonify({"error": "account not found"}), 404
 
             balance = row[0]
             new_balance = balance - amount if tx_type == "debit" else balance + amount
             if new_balance < 0:
-                conn.rollback()
                 return jsonify({"error": "insufficient funds",
                                 "balance": float(balance)}), 400
 
@@ -182,10 +205,6 @@ def create_transaction():
                 "VALUES (%s, %s, %s) RETURNING tx_id",
                 (account_id, amount, tx_type),
             ).fetchone()[0]
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
     return jsonify({"tx_id": tx_id, "account_id": account_id,
                     "new_balance": float(new_balance)}), 201
@@ -204,8 +223,9 @@ def with_retry(fn, max_retries=5):
 
 def do_transfer(from_acc, to_acc, amount):
     with pool.connection() as conn:
-        try:
+        with conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+
             first, second = sorted([from_acc, to_acc])
             found = 0
             for acc in (first, second):
@@ -216,22 +236,19 @@ def do_transfer(from_acc, to_acc, amount):
                 if row is not None:
                     found += 1
             if found < 2:
-                conn.rollback()
                 return {"error": "account not found"}, 404
 
-            conn.execute("SAVEPOINT before_debit")
             try:
-                conn.execute(
-                    "UPDATE accounts SET balance = balance - %s WHERE account_id = %s",
-                    (amount, from_acc),
-                )
+                with conn.transaction():
+                    conn.execute(
+                        "UPDATE accounts SET balance = balance - %s WHERE account_id = %s",
+                        (amount, from_acc),
+                    )
             except pg_errors.CheckViolation:
-                conn.execute("ROLLBACK TO SAVEPOINT before_debit")
                 balance = conn.execute(
                     "SELECT balance FROM accounts WHERE account_id = %s",
                     (from_acc,),
                 ).fetchone()[0]
-                conn.rollback()
                 return {"error": "insufficient funds", "balance": float(balance)}, 400
 
             conn.execute(
@@ -243,10 +260,6 @@ def do_transfer(from_acc, to_acc, amount):
                 "VALUES (%s, %s, 'debit'), (%s, %s, 'credit')",
                 (from_acc, amount, to_acc, amount),
             )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
     return {"from_account": from_acc, "to_account": to_acc,
             "amount": float(amount), "status": "ok"}, 200

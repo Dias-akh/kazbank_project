@@ -49,40 +49,40 @@ All queries use `%s` parameters (no SQL injection).
 ```bash
 U=http://127.0.0.1:5001
 
-curl "$U/customers"
-curl "$U/customers?city=Almaty"
-curl "$U/accounts?customer_id=1"
-curl "$U/transactions?account_id=1"
+curl "http://127.0.0.1:5001/customers" 
+curl "http://127.0.0.1:5001/customers?city=Almaty"
+curl "http://127.0.0.1:5001/accounts?customer_id=1"
+curl "http://127.0.0.1:5001/transactions?account_id=1"
 
 # create customer -> 201
-curl -X POST $U/customers -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:5001/customers -H "Content-Type: application/json" \
      -d '{"full_name": "Test User", "city": "Almaty", "email": "test@kazbank.kz"}'
 
 # duplicate email -> 409
-curl -X POST $U/customers -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:5001/customers -H "Content-Type: application/json" \
      -d '{"full_name": "Copy", "email": "arman@kazbank.kz"}'
 
 # missing full_name -> 400
-curl -X POST $U/customers -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:5001/customers -H "Content-Type: application/json" \
      -d '{"city": "Almaty"}'
 
 # debit / credit
-curl -X POST $U/transactions -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:5001/transactions -H "Content-Type: application/json" \
      -d '{"account_id": 1, "amount": 5000, "tx_type": "debit"}'
 
 # transfer -> 200
-curl -X POST $U/transfer -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:5001/transfer -H "Content-Type: application/json" \
      -d '{"from_account": 1, "to_account": 3, "amount": 10000}'
 
 # insufficient funds -> 400, nothing changes
-curl -X POST $U/transfer -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:5001/transfer -H "Content-Type: application/json" \
      -d '{"from_account": 13, "to_account": 1, "amount": 999999}'
 
 # SQL injection attempt -> [] (value is a parameter, not SQL)
-curl "$U/customers?city=Almaty'%20OR%20'1'='1"
+curl "http://127.0.0.1:5001/customers?city=Almaty'%20OR%20'1'='1"
 
 # pool stats
-curl "$U/health"
+curl "http://127.0.0.1:5001/health"
 
 # database down (stop PostgreSQL) -> 503 on any endpoint
 ```
